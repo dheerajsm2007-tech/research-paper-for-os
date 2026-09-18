@@ -230,9 +230,8 @@ def _prepare_target(y, log_target: bool) -> np.ndarray:
     """The runtime target spans five orders of magnitude (median ~9s, 99th
     percentile ~309,000s). Squared-error regression on the raw scale is
     dominated by the rare giants and produced negative predictions for
-    ordinary tasks. Modelling log1p(runtime) is the standard remedy in the
-    runtime-prediction literature (Tsafrir et al. 2007; Gaussier et al. 2015)
-    and cannot yield a negative burst. The target is still job-level runtime
+    ordinary tasks. Modelling log1p(runtime) is a common remedy for
+    heavy-tailed positive targets and cannot yield a negative burst. The target is still job-level runtime
     (CLAUDE.md rule 4) -- only the loss scale changes.
     """
     y = np.asarray(y, dtype=float)

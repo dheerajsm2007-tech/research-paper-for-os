@@ -5,3 +5,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 results/figures/*.png
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.pdf

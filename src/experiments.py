@@ -28,7 +28,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from evaluate_predictors import FEATURES_PATH, chronological_split
+from evaluate_predictors import FEATURES_PATH, TRAIN_FRACTION, chronological_split
 from predictors import (
     FEATURE_COLUMNS,
     ExponentialAveraging,
@@ -43,6 +43,7 @@ from scheduler import FCFS, RoundRobin, SRTF
 SCHEDULER_TABLE_PATH = os.path.join("results", "tables", "scheduler_comparison.csv")
 SENSITIVITY_TABLE_PATH = os.path.join("results", "tables", "sensitivity.csv")
 SENSITIVITY_LOGNORMAL_TABLE_PATH = os.path.join("results", "tables", "sensitivity_lognormal.csv")
+RUN_SUMMARY_PATH = os.path.join("results", "tables", "run_summary.csv")
 
 SEED = 42
 QUANTUM = 4
@@ -114,15 +115,17 @@ def run_sweep(model, levels, test, rr_avg_wait, oracle_wait, seed_base, label):
     sweep = pd.DataFrame(rows)
     crossed = sweep.loc[sweep["avg_waiting_time"] > rr_avg_wait]
     if crossed.empty:
+        crossover = float("nan")
         print(f"  No crossover: noisy SRTF stays below Round Robin ({rr_avg_wait:.2f}) up to level {levels[-1]}.")
     else:
         first = crossed.iloc[0]
+        crossover = float(first["level"])
         print(
             f"  Crossover: noisy SRTF first exceeds Round Robin ({rr_avg_wait:.2f}) at "
             f"level={first['level']} (avg_waiting_time={first['avg_waiting_time']:.2f})."
         )
     print()
-    return sweep
+    return sweep, crossover
 
 
 def build_srtf_variants(train, y_train, train_reg, y_train_reg):
@@ -206,7 +209,7 @@ def main():
 
     # --- Sensitivity analysis ---
     rr_avg_wait = by_name["RR(q=4)"]
-    uniform = run_sweep(
+    uniform, crossover_uniform = run_sweep(
         "uniform", NOISE_LEVELS, test, rr_avg_wait, oracle_wait, SEED,
         "bounded uniform, predicted = true * (1 + U(-eps, eps))",
     )
@@ -214,7 +217,7 @@ def main():
     uniform.to_csv(SENSITIVITY_TABLE_PATH, index=False)
     print(f"Wrote {SENSITIVITY_TABLE_PATH}\n")
 
-    lognormal = run_sweep(
+    lognormal, crossover_lognormal = run_sweep(
         "lognormal", LOGNORMAL_SIGMAS, test, rr_avg_wait, oracle_wait, SEED + 100,
         "log-normal, predicted = true * exp(sigma * N(0, 1))",
     )
@@ -226,10 +229,11 @@ def main():
     # empirical log-error spread, std(log(predicted / true)), is directly
     # comparable to sigma.
     true_runtime = test["runtime"].to_numpy(dtype=float)
+    sigma_hat = {}
     for name in ("SRTF+Linear", "SRTF+GBM"):
         preds = schedulers[name].predictor.predict(test)
-        sigma_hat = float(np.std(np.log(preds / true_runtime)))
-        print(f"Empirical log-error sigma of {name.split('+')[1]}: {sigma_hat:.2f} (compare with the log-normal sweep)")
+        sigma_hat[name] = float(np.std(np.log(preds / true_runtime)))
+        print(f"Empirical log-error sigma of {name.split('+')[1]}: {sigma_hat[name]:.2f} (compare with the log-normal sweep)")
     print()
 
     # --- Headline recovery number ---
@@ -238,6 +242,7 @@ def main():
     w_oracle = by_name["SRTF+Oracle"]
     denominator = w_expavg - w_oracle
     if abs(denominator) < 1e-9:
+        recovery = float("nan")
         print(
             "WARNING: SRTF+ExpAvg and SRTF+Oracle have (numerically) identical avg waiting time "
             "-- the recovery percentage is undefined (0/0 gap). Skipping."
@@ -248,6 +253,27 @@ def main():
             f"Headline: SRTF+GBM recovers {recovery:.1f}% of the waiting-time gap between "
             f"SRTF+ExpAvg ({w_expavg:.2f}) and SRTF+Oracle ({w_oracle:.2f})."
         )
+
+    # Single source of truth for every setup number the paper states
+    # (src/make_tables.py turns these into LaTeX macros).
+    summary = pd.DataFrame(
+        [
+            ("n_train", len(train)),
+            ("n_test", len(test)),
+            ("n_tasks", len(features)),
+            ("train_fraction", TRAIN_FRACTION),
+            ("seed", SEED),
+            ("quantum", QUANTUM),
+            ("recovery_pct", recovery),
+            ("crossover_uniform", crossover_uniform),
+            ("crossover_lognormal", crossover_lognormal),
+            ("sigma_linear", sigma_hat["SRTF+Linear"]),
+            ("sigma_gbm", sigma_hat["SRTF+GBM"]),
+        ],
+        columns=["key", "value"],
+    )
+    summary.to_csv(RUN_SUMMARY_PATH, index=False)
+    print(f"\nWrote {RUN_SUMMARY_PATH}")
 
 
 if __name__ == "__main__":
