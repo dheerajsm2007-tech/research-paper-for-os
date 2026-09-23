@@ -1,5 +1,17 @@
 # Notes for the sections you write yourself
 
+> **Status (2026-09-23):** every section is now drafted in `main.tex`. These notes
+> remain as the argument outline. Two corrections to the notes below: (1) the
+> exponential-averaging and Last2 baselines previously leaked future training
+> completions into test-time state; after the fix (see
+> `tests/test_predictor_causality.py`) they under-predict about 18.5% of test tasks,
+> not "almost never", and the headline moved from 59.0% to 58.5%; (2) GBM beats
+> linear regression in scheduling because it ranks tasks better (Spearman 0.66 vs
+> 0.09), not because of MAE. Before submission: verify each `% VERIFY` bib entry,
+> fill the missing authors/venues BibTeX warns about, and check the
+> `VERIFY-CLAIM` characterisations in Section II against the full texts.
+
+
 Arguments only, derived from `results/tables/`. Not prose to paste. Every
 number below is in a table; cite the table, do not retype the number.
 
@@ -97,7 +109,7 @@ number below is in a table; cite the table, do not retype the number.
   giants — is not present in arrival-time features.
 - **The transferable result** is methodological: the recovery metric, the
   causal feature test, the oracle-equivalence test, and the structured-vs-random
-  error contrast. Those survive a change of trace; the 59% number does not.
+  error contrast. Those survive a change of trace; the 58.5% number does not.
 - **Future work that follows directly from the tables:** (1) revise predictions
   when elapsed time exceeds them (closes the starvation hole); (2) evaluate on a
   slice spanning several days and on a second trace (Google 2019 or GWA-T-4) so

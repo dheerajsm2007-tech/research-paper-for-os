@@ -31,8 +31,6 @@ dheerajsm2007@gmail.com}}
 \maketitle
 
 \begin{abstract}
-% TODO(author): this abstract states only what was done and what the tables
-% show; revise the framing once Sections I, II, VI and VIII are written.
 Shortest-remaining-time-first (SRTF) scheduling minimises mean waiting time on
 a single processor only when the service demand of every task is known in
 advance; operating systems approximate that demand by exponential averaging of
@@ -50,9 +48,13 @@ waiting-time gap between exponential-averaging SRTF and oracle SRTF, yet no
 prediction-driven scheduler outperformed round robin on this workload. A
 sensitivity analysis with bounded-uniform and log-normal prediction noise
 locates the error level at which SRTF loses its advantage over round robin and
-shows that the errors of the fitted models are structured rather than random.
-All tables, figures and the headline number are generated programmatically
-from the experiment outputs.
+shows that the errors of the fitted models are structured rather than random:
+the gradient-boosted model waits about \ratioGBMNoise{} times longer than
+random error of the same spread would imply, because it systematically
+under-predicts the rare very long tasks. Mean absolute error does not
+predict scheduling quality; rank agreement with the true runtime does. All
+tables, figures and numbers are generated programmatically from the
+experiment outputs.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -63,18 +65,160 @@ learning, cluster traces, leakage-safe evaluation
 \section{Introduction}
 \label{sec:introduction}
 
-% TODO(author): Sections I.A--I.D are to be written by the author; see
-% paper/NOTES_FOR_ME.md. The sentence below exists so that the headline number
-% appears here through the same macro as in the abstract and Section VI.
-The headline result of this study is that a gradient-boosted predictor
-recovers \headline{} of the waiting-time gap between exponential-averaging
-SRTF and oracle SRTF (Section~\ref{sec:results}).
+\subsection{Motivation}
+Shortest-remaining-time-first (SRTF), the preemptive form of
+shortest-job-first, minimises mean waiting time on a single
+processor~\cite{schrage_optimality_1968}. It is also taught as a policy that
+cannot be implemented exactly, because the length of the next CPU burst is
+unknown when the scheduling decision is made~\cite{silberschatz_os_2018}.
+The textbook remedy is to estimate that length by exponential averaging of
+previous bursts. Meanwhile, learned components have displaced hand-designed
+heuristics elsewhere in computer systems, including index
+structures~\cite{kraska_case_2018}, cache
+replacement~\cite{vietri_driving_2018,rodriguez_learning_2021,shi_applying_2019,song_learning_2020}
+and compiler optimisation~\cite{wang_machine_2018}. It is therefore natural
+to ask whether a supervised model, trained only on information available
+when a task arrives, is a better estimator for SRTF, and how much of SRTF's
+theoretical advantage such an estimator actually delivers.
+
+\subsection{The Size and Location of the Gap}
+On the workload studied here, the room for a better estimator is large.
+Oracle SRTF, which is given every task's true runtime, achieves a mean
+waiting time of \wOracle{}\,h per task, while SRTF driven by exponential
+averaging waits \wExpAvg{}\,h, a factor of \ratioExpAvgOracle{} worse
+(Table~\ref{tab:schedulers}). The same table shows that round robin, which
+uses no runtime estimate at all, waits \wRR{}\,h, which is \ratioExpAvgRR{}
+times less than exponential-averaging SRTF. The question that matters to a
+scheduler designer is therefore not whether machine learning can beat
+exponential averaging. It is whether any predictor restricted to
+arrival-time information can make SRTF competitive with a policy that needs
+no prediction at all.
+
+\subsection{Approach and Principal Findings}
+This paper answers that question empirically on the first \nTasks{} tasks of
+the Alibaba cluster-trace-v2018 batch
+workload~\cite{cheng_characterizing_2018}. Six predictors, from exponential
+averaging to gradient-boosted trees, are trained on leakage-safe features and
+evaluated on a chronological split, and each one drives SRTF in a
+discrete-event single-CPU simulator. The gradient-boosted predictor recovers
+\headline{} of the waiting-time gap between exponential-averaging SRTF and
+oracle SRTF, yet it still waits \ratioGBMRR{} times longer than round robin,
+and no prediction-driven SRTF outperforms round robin.
+
+This negative result is the principal finding, not a caveat. On this trace
+the features available at arrival do not carry the information SRTF needs
+most, namely which of the arriving tasks are the rare very long ones. A
+two-model sensitivity analysis shows why the fitted models fall short of
+what their aggregate error suggests: their errors are concentrated on
+exactly those long tasks.
+
+\subsection{Contributions}
+\begin{enumerate}
+  \item A leakage-safe feature pipeline and set of online baselines on a real
+    production trace, with unit tests that fail if any task still running at
+    another task's arrival contributes to that task's features or
+    predictions.
+  \item An end-to-end mapping from prediction error to scheduling outcome.
+    The recovered fraction of the gap, (\ref{eq:recovery}), and rank
+    agreement are reported next to conventional error metrics, and the
+    results show that mean absolute error does not predict scheduling
+    quality.
+  \item A two-model sensitivity analysis, bounded uniform and log-normal,
+    that locates the error level at which SRTF loses to round robin and
+    shows that structured error costs far more waiting time than random
+    error of the same spread.
+  \item A reproducible artefact in which every table, figure and number in
+    the text is generated from the experiment outputs.
+\end{enumerate}
+
+\subsection{Organisation}
+Section~\ref{sec:related} reviews related work.
+Section~\ref{sec:problem} formalises the scheduling and prediction problem,
+Section~\ref{sec:method} describes the implementation and
+Section~\ref{sec:setup} the experimental setup. Section~\ref{sec:results}
+presents and interprets the results, Section~\ref{sec:threats} discusses
+threats to validity and Section~\ref{sec:conclusion} concludes.
 
 \section{Related Work}
 \label{sec:related}
 
-% TODO(author): to be written by the author after reading the sources; see
-% paper/NOTES_FOR_ME.md.
+% VERIFY-CLAIM(author): the one-line characterisations of prior work below
+% follow LITERATURE.md. Check each against the full text before submission,
+% in particular what Helmy et al. and Effah et al. measured and how Tsafrir
+% et al. correct predictions that a job outlives.
+
+\subsection{Burst-Time Prediction for CPU Scheduling}
+Predicting resource demand to inform scheduling predates machine learning.
+Dinda~\cite{dinda_prediction_2002} built a real-time scheduling advisor on
+predicted running times. The Network Weather Service line of work forecast
+network performance and CPU availability from
+time series~\cite{wolski_dynamically_1998,wolski_predicting_2000,yang_homeostatic_2003},
+and Zhang et al.~\cite{zhang_predict_2008} predicted task running times in
+grids from CPU-load predictions. Helmy et al.~\cite{helmy_machine_2015}
+framed CPU-burst estimation as supervised learning, training
+nearest-neighbour, support-vector, neural-network and decision-tree models on
+16 process features from the GWA-T-4 grid trace. Jha and
+Goyal~\cite{jha_cpu_2022} pursued the same goal, and Pourali et
+al.~\cite{pourali_fuzzy_undated} used a fuzzy rather than a learned model.
+Effah et al.~\cite{effah_predicting_2025} is the closest prior work to this
+paper: it predicts burst times to drive SJF and SRTF, but on a synthetic
+dataset modelled on GWA-T-4. Shafin and Ahmed~\cite{shafin_leakage_2026}
+revisited the Helmy formulation with a strict pre-submission feature policy
+and chronological baselines, and this paper adopts their leakage-safe
+framing. The present work differs from this line in two respects. It uses a
+real production trace under a chronological split, and it reports the
+waiting time that prediction accuracy buys, not prediction accuracy alone.
+
+\subsection{Runtime Prediction for HPC Backfilling}
+The richest neighbouring literature concerns runtime estimates for
+backfilling batch schedulers. User-requested runtimes are known to be poor
+estimates~\cite{lee_are_2004,lee_user_2006}, and Chiang et
+al.~\cite{chiang_impact_2002} showed that more accurate requested runtimes
+improve production scheduling performance, which is the premise behind the
+recovery metric of this paper. Tsafrir et al.~\cite{tsafrir_backfilling_2007}
+replaced user estimates with system-generated predictions from each user's
+last two jobs, the origin of the Last2 baseline used here, and Gaussier et
+al.~\cite{gaussier_improving_2015} used online regression for the same
+purpose. Later work applied ensembles, transformers and automata-based deep
+models~\cite{chen_runtime_2020,chen_job_2023,cheon_ared_2023}, predicted from
+system logs~\cite{chen_predicting_2013}, and predicted other job
+resources~\cite{tanash_improving_2019}. Because an under-estimate can get a
+job killed at its walltime limit, a separate strand targets under-estimation
+directly, through Tobit adjustment~\cite{fan_tobit_undated}, dedicated
+predictors~\cite{unknown_machine_2017}, soft
+walltimes~\cite{chlumsky_improving_2022} and uncertainty-aware quantile
+prediction~\cite{unknown_uarp_2026}. TARE~\cite{xiao_tare_2026} argues that
+mean-based metrics hide tail behaviour, which is why this paper reports the
+under-prediction rate separately.
+
+Single-CPU SRTF is a harsher consumer of predictions than backfilling.
+Tsafrir et al. correct a prediction once a job outlives
+it~\cite{tsafrir_backfilling_2007}, whereas the prediction-driven SRTF of
+(\ref{eq:srtf-pred}) fixes the estimate at arrival and never revises it. An
+under-predicted long task is therefore dispatched ahead of many short ones
+and, once its predicted remaining time is exhausted, cannot be preempted.
+
+\subsection{Learned Scheduling Policies}
+A different line of work learns the scheduling policy itself with
+reinforcement learning. DeepRM~\cite{mao_resource_2016} introduced the
+approach for multi-resource cluster scheduling, and later variants refined
+its state and action design~\cite{ye_new_undated,unknown_data_2020,domeniconi_cush_undated,cunha_impact_undated}.
+Decima~\cite{mao_learning_2019} learned schedules for data-processing
+clusters and reported large reductions in job completion time over
+hand-tuned heuristics, and RLScheduler~\cite{zhang_rlscheduler_2020} applied
+the approach to HPC batch scheduling. This paper deliberately does not learn
+the policy. It keeps SRTF, which is optimal given true runtimes, and learns
+only its input. The oracle then gives a known ceiling, and the part of the
+gap that is due to the predictor can be measured directly, which an
+end-to-end learned policy does not provide.
+
+\subsection{Cluster Traces}
+Public production traces underpin this line of research. The Google
+traces~\cite{reiss_google_2011,chen_analysis_2010,reiss_heterogeneity_2012,liu_characterizing_2012}
+document the Borg cluster manager's workload~\cite{verma_large_2015}. The
+Alibaba traces capture co-located online services and batch
+jobs~\cite{lu_imbalance_2017,cheng_characterizing_2018,cheng_analyzing_2018,liu_elasticity_2018,unknown_characterizing_2020}.
+This study uses the batch-task table of the 2018 Alibaba release.
 
 \section{Problem Formulation}
 \label{sec:problem}
@@ -98,9 +242,8 @@ arrival and every completion, SRTF selects
   \label{eq:srtf}
 \end{equation}
 the task with the least remaining service. When every $t_i$ is known at
-$a_i$, this rule minimises $\bar{W}$ on a single processor [CITATION NEEDED:
-single-processor SRPT optimality proof, e.g.\ Schrage (1968) or Kleinrock,
-\emph{Queueing Systems}, Vol.~2]. No operating system knows $t_i$ in advance,
+$a_i$, this rule minimises $\bar{W}$ on a single
+processor~\cite{schrage_optimality_1968}. No operating system knows $t_i$ in advance,
 so (\ref{eq:srtf}) is a ceiling rather than an implementable policy; this
 paper refers to it as \emph{oracle SRTF}.
 
@@ -112,9 +255,8 @@ from a feature vector $\mathbf{x}_i$, and never revised afterwards:
   i^{*}(\tau) = \arg\min_{i \in \mathcal{R}(\tau)} \bigl( \hat{t}_i - e_i(\tau) \bigr).
   \label{eq:srtf-pred}
 \end{equation}
-The textbook estimator is exponential averaging [CITATION NEEDED:
-Silberschatz, Galvin and Gagne, \emph{Operating System Concepts}, 10th ed.,
-Ch.~5], which maintains a running estimate $\tau_n$ from the sequence of
+The textbook estimator is exponential
+averaging~\cite{silberschatz_os_2018}, which maintains a running estimate $\tau_n$ from the sequence of
 observed runtimes $t_1, t_2, \ldots$ of the same source:
 \begin{equation}
   \tau_{n+1} = \alpha\, t_n + (1 - \alpha)\, \tau_n, \qquad 0 \le \alpha \le 1 .
@@ -152,7 +294,10 @@ $\hat{t}_i < t_i$. The last is reported separately because aggregate error
 metrics hide tail behaviour~\cite{xiao_tare_2026}, and because under- and
 over-estimation of equal magnitude have very different consequences under
 (\ref{eq:srtf-pred}): an under-estimated task's predicted remaining service
-becomes negative as it runs and it can no longer be preempted.
+becomes negative as it runs and it can no longer be preempted. Because
+(\ref{eq:srtf-pred}) consumes only the \emph{order} of the predictions,
+the Spearman rank correlation $\rho_s$ between predicted and actual runtime
+is reported as well.
 
 Let $\bar{W}_{\mathrm{EA}}$, $\bar{W}_{\mathrm{GBM}}$ and
 $\bar{W}_{\mathrm{OR}}$ denote the mean waiting time of SRTF driven by
@@ -225,15 +370,17 @@ y_{\mathrm{train}})$, $\mathrm{predict}(X)$.
   \item \emph{Oracle} returns $t_i$ itself and defines the ceiling.
 \end{itemize}
 The logarithmic target was adopted because the runtime spans five orders of
-magnitude and squared-error regression on the raw scale produced negative
-predictions for ordinary tasks [CITATION NEEDED: prior use of a
-log-transformed runtime target in job runtime prediction]. Predictions of
+magnitude and, in preliminary runs, squared-error regression on the raw
+scale produced negative predictions for ordinary tasks. Predictions of
 both regression models are mapped back with $\exp(\cdot) - 1$ and floored at
 1\,s, the smallest runtime in the data. Exponential averaging and Last2 are
-sequential estimators: $\mathrm{fit}$ replays the training completions to
-build per-job state, and $\mathrm{predict}$ continues the same causal walk
-through the test period, fixing each prediction at the task's arrival and
-updating state only at completions, as an online scheduler would.
+sequential estimators. $\mathrm{fit}$ stores the training events, and
+$\mathrm{predict}$ walks one merged timeline of training and test arrivals
+and completions from an empty state, as an online scheduler would. Each
+completion updates the state only when it occurs, and each test prediction
+is fixed at the task's arrival. A training task still running when a test
+task arrives has therefore not yet been observed, and a unit test asserts
+this across the train/test boundary.
 
 \subsection{Discrete-Event Simulator}
 A single-CPU simulator was written with one event loop per policy:
@@ -341,8 +488,8 @@ objective on the logarithmic target, and \texttt{random\_state} equal to the
 seed below. This configuration was selected among four candidates on a
 chronological validation split formed from the last 20\% of the training
 set; the test set was not consulted. Linear regression used the
-scikit-learn ordinary-least-squares solver [CITATION NEEDED: scikit-learn,
-Pedregosa et al., JMLR 2011] behind a standardisation step, without
+scikit-learn ordinary-least-squares solver~\cite{pedregosa_scikit_2011}
+behind a standardisation step, without
 regularisation. Exponential averaging used $\alpha = 0.5$ in
 (\ref{eq:expavg}); Last2 used a window of two; the median baseline used the
 median of the training runtimes. Both regression models and the median
@@ -380,9 +527,6 @@ charged against the simulated scheduler.
 \section{Results and Discussion}
 \label{sec:results}
 
-% TODO(author): the interpretation of these results is the contribution and
-% is to be written by the author (see paper/NOTES_FOR_ME.md). The paragraph
-% below is a mechanical pointer to the generated tables and figures.
 Table~\ref{tab:prediction} reports the prediction error of every predictor on
 the test split, Table~\ref{tab:schedulers} the scheduling outcomes of the
 seven schedulers, and Table~\ref{tab:sensitivity} the two sensitivity sweeps.
@@ -396,6 +540,105 @@ exceeds the round-robin waiting time at $\varepsilon = \crossoverUniform$ and
 the log-normal sweep at $\sigma = \crossoverLognormal$; the empirical
 standard deviation of $\log(\hat{t}_i / t_i)$ over the test split is
 \sigmaGBM{} for gradient boosting and \sigmaLinear{} for linear regression.
+
+\subsection{Prediction Error Does Not Predict Scheduling Quality}
+The three regression-style predictors, the constant median, linear
+regression and gradient boosting, are within \maeSpreadPct\% of one another
+in mean absolute error, and their root mean squared errors are nearly
+identical (Table~\ref{tab:prediction}). Both metrics are dominated by a
+handful of very long tasks: the median test runtime is \medianActual{}\,s,
+but the longest test task runs for \maxActual{}\,s. Exponential averaging
+and Last2 are worse still. Almost every test task belongs to a job with no
+completed task, so both fall back to the running mean of completed runtimes,
+around \meanExpAvgPred{}\,s, for nearly every task.
+
+The scheduling outcomes separate these predictors sharply. Linear regression
+and gradient boosting differ by less than \maeSpreadPct\% in mean absolute
+error, yet SRTF driven by linear regression waits \ratioLinearGBM{} times
+longer (Table~\ref{tab:schedulers}). The difference lies in ordering. SRTF
+uses only the order of the predictions, and the Spearman correlation with
+actual runtime is \spearmanGBM{} for gradient boosting but only
+\spearmanLinear{} for linear regression and \spearmanExpAvg{} for
+exponential averaging. Mean absolute error rewards predicting the typical
+task well; a scheduler needs the order of the tasks right, especially at the
+long end. This is why the recovery percentage of (\ref{eq:recovery}), not
+mean absolute error, is the quantity reported as the headline.
+
+\subsection{Scheduling Outcomes}
+Oracle SRTF has the lowest mean waiting time of all seven schedulers, as it
+must, and first-come-first-served the highest. Replacing exponential
+averaging with gradient boosting reduces SRTF's mean waiting time from
+\wExpAvg{}\,h to \wGBM{}\,h, recovering \headline{} of the gap to the
+oracle. Round robin, however, waits only \wRR{}\,h, and no prediction-driven
+SRTF comes close to it. Round robin pays for this with two orders of
+magnitude more context switches, and its response time is lower than that
+of every other policy because every task receives a quantum soon after it
+arrives.
+
+Two properties of the test split shape these outcomes. First, every test
+task arrives within a window of \testWindow{}\,s, while the backlog takes
+far longer to drain, so the problem is close to ordering a single batch.
+Second, for linear regression, gradient boosting and the oracle, the number
+of context switches equals the number of tasks minus one, and waiting time
+equals response time. No task was ever preempted once started, so SRTF
+reduced to non-preemptive shortest-predicted-job-first over that batch.
+Under these conditions the cost of a mistake is simple. A long task that is
+predicted to be short runs to completion ahead of every task ranked behind
+it.
+
+Fig.~\ref{fig:scatter} shows exactly this failure. Gradient-boosted
+predictions saturate: the largest prediction on the test split is
+\maxGBMPred{}\,s. The \nLongTest{} test tasks that run longer than
+\longTaskThreshold{}\,s receive predictions between \longGBMMin{}\,s and
+\longGBMMax{}\,s, indistinguishable from those of ordinary tasks. Their
+records at arrival do not tell them apart from typical tasks.
+
+\subsection{Sensitivity to Prediction Error}
+Table~\ref{tab:sensitivity} and Fig.~\ref{fig:sensitivity} report SRTF under
+synthetic prediction error. Under bounded uniform noise SRTF is remarkably
+robust: its waiting time rises only slowly up to $\varepsilon = 1$, then
+exceeds round robin at $\varepsilon = \crossoverUniform$. The mechanism is
+the floor at 1\,s. Once $\varepsilon > 1$ the factor $1 + U(-\varepsilon,
+\varepsilon)$ can be non-positive, some long tasks are predicted at 1\,s,
+and each of them blocks the processor. The waiting time at
+$\varepsilon = 5$ is lower than at $\varepsilon = 3$ because each level is a
+single random draw; which long tasks happen to be floored varies between
+draws.
+
+The log-normal model produces multiplicative errors of the kind a fitted
+model makes, and SRTF degrades smoothly under it, crossing round robin at
+$\sigma = \crossoverLognormal$. The empirical log-error spread of gradient
+boosting, $\sigma = \sigmaGBM$, lies inside the region where SRTF still beats
+round robin, and random log-normal error of that spread yields about
+\wNoiseAtSigmaGBM{}\,h of waiting by linear interpolation of the sweep. The
+fitted model's actual waiting time is \wGBM{}\,h, about \ratioGBMNoise{}
+times higher. Linear regression's spread, $\sigma = \sigmaLinear$, lies
+beyond the crossover.
+
+The difference is structure. Random error of a given spread is equally
+likely to over- or under-predict any task, whereas the fitted model's error
+is correlated with runtime: it systematically under-predicts the long tasks
+whose placement dominates mean waiting time. Structured error of a given
+spread therefore hurts SRTF far more than random error of the same spread.
+The practical consequence is that a deployment decision cannot be made from
+an error budget alone; it also depends on how the error correlates with the
+runtime itself.
+
+\subsection{Under-Prediction and the Fixed Estimate}
+Under (\ref{eq:srtf-pred}) an under-predicted task's predicted remaining
+service reaches zero while it still has work left, after which no arrival
+can preempt it. The under-prediction rate of Table~\ref{tab:prediction} is
+\underGBM\% for gradient boosting, \underLinear\% for linear regression and
+\underExpAvg\% for exponential averaging. A low rate is not sufficient on its
+own: exponential averaging under-predicts least of the three, yet schedules
+worst, because its near-constant predictions carry almost no ordering
+information. What matters is whether the \emph{long} tasks are
+under-predicted, and for gradient boosting they all are. The underlying
+design flaw is the rule of predicting once and never revising. A deployed
+predictor should increase its estimate once a task's elapsed service
+exceeds it, as backfilling schedulers already
+do~\cite{tsafrir_backfilling_2007}. This is the concrete engineering
+recommendation of this study.
 
 \input{tables/table_prediction.tex}
 \input{tables/table_schedulers.tex}
@@ -430,15 +673,72 @@ standard deviation of $\log(\hat{t}_i / t_i)$ over the test split is
 \section{Threats to Validity}
 \label{sec:threats}
 
-% TODO(author): README.md Section 9 lists the threats in full (arrival-time
-% proxy, task- vs job-level target, single trace, simulation not deployment,
-% temporal features as locality indicators, learned models vs the median
-% baseline, bounded noise vs structured error). See paper/NOTES_FOR_ME.md.
+\emph{Arrival-time proxy.} The \texttt{batch\_task} table records no
+submission time, so arrival is the recorded start time. Any queueing delay
+before a task started is invisible, and ``arrival'' here means ``became
+runnable''. The causal ordering of historical features and the temporal
+features are all defined relative to this proxy.
+
+\emph{Prediction target.} The target is task-level runtime, the duration of
+one stage of a job executed by many instances. It is neither a CPU burst
+between I/O operations, which (\ref{eq:expavg}) was designed to estimate,
+nor strictly a whole job. The simulator treats it as a single CPU demand.
+
+\emph{Short slice and batch-like test set.} The \nTasks{} tasks span about
+24 hours, and every test task arrives within \testWindow{}\,s. The
+\texttt{hour\_of\_day} and \texttt{day\_of\_week} features therefore act as
+indicators of position in the slice rather than of any daily or weekly
+cycle, although they are among the gradient-boosted model's most important
+features. The near-simultaneous arrivals also mean that preemption plays
+almost no role in the test period, so the results characterise batch
+ordering more than online preemptive scheduling.
+
+\emph{Single trace, simulation and uncharged inference.} All results come
+from one trace and a simulator. Preemption cost is not modelled, the cost of
+running a predictor is not charged against scheduling latency, and no
+kernel implementation was attempted. The results may not transfer to other
+workloads.
+
+\emph{Single noise draws.} Each sensitivity level uses one random draw, so
+individual points carry sampling noise, as the non-monotone uniform sweep at
+its largest levels shows. The crossover levels should be read as
+approximate.
+
+\emph{Weak learned models.} On this slice the learned models barely improve
+on a constant median in mean absolute error. The recovery percentage must
+therefore be read together with the round-robin comparison, not instead of
+it.
 
 \section{Conclusion and Future Work}
 \label{sec:conclusion}
 
-% TODO(author): to be written by the author; see paper/NOTES_FOR_ME.md.
+This paper measured how much of the waiting-time advantage of clairvoyant
+SRTF a learned, arrival-time runtime predictor can recover on a production
+cluster trace. A gradient-boosted model recovers \headline{} of the gap
+between exponential-averaging SRTF and oracle SRTF, but it does not make
+SRTF competitive with round robin, which uses no prediction at all. The
+reason is that the information SRTF needs most, which of the arriving tasks
+are the rare very long ones, is not present in the arrival-time features of
+this trace. Mean absolute error hides this failure, while rank correlation
+and the scheduling outcome expose it. The sensitivity analysis shows that
+the fitted model's error, being concentrated on long tasks, costs several
+times more waiting than random error of the same spread.
+
+The specific percentages are properties of this trace slice and will not
+transfer. The methodology should: the recovery metric, the causality tests
+for features and online baselines, the oracle-equivalence test for the
+simulator, and the contrast between structured and random error apply to
+any trace.
+
+Three directions follow directly from the results. First, predictions should
+be revised once a task's elapsed service exceeds them, which closes the
+failure mode in which an under-predicted long task cannot be preempted.
+Second, the evaluation should be repeated on a slice spanning several days
+and on a second trace, such as the Google 2019 trace or GWA-T-4, so that
+temporal features can capture genuine periodicity and arrivals are spread
+out in time. Third, quantile or classification predictors that target the
+question ``is this task one of the very long ones?'' address the decision
+the scheduler actually makes more directly than mean-error regression does.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

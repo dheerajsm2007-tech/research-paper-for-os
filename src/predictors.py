@@ -19,11 +19,14 @@ The textbook exponential-averaging recurrence (tau_next = alpha*t_last +
 (1-alpha)*tau_prev) and "mean of the last k completed same-job runtimes" are
 both inherently sequential/online estimators, unlike LinearRegression/GBM
 which are ordinary batch regressors over static feature columns. To evaluate
-them faithfully, fit(X_train, y_train) walks the training rows in causal
-arrival/completion order to build up initial per-job state, and
-predict(X_test) CONTINUES that same walk across the test rows -- exactly as
-a real scheduler would keep updating its running estimate as bursts complete
-over time, including bursts that complete during the test period itself.
+them faithfully, fit(X_train, y_train) stores the training events and
+predict(X_test) walks ONE merged arrival/completion timeline of training and
+test events from an empty state -- exactly as a real scheduler would keep
+updating its running estimate as bursts complete over time. A training task
+still running when a test task arrives is not yet observed; an earlier
+version replayed every training completion inside fit(), which leaked
+future runtimes into test-time state (fixed; see
+tests/test_predictor_causality.py).
 
 This is why predict(X) for these two classes (and for Oracle) expects X to
 carry a 'runtime' column, unlike LinearRegressionPredictor/GBMPredictor,
@@ -88,14 +91,75 @@ class Predictor:
         raise NotImplementedError
 
 
-class ExponentialAveraging(Predictor):
-    """tau_next = alpha * t_last + (1 - alpha) * tau_prev (Silberschatz &
-    Galvin's textbook formula). Uses only previous_runtime -- equivalently,
-    each job's own most recently completed burst -- no other feature.
+def _event_frame(X, y) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "job_id": np.asarray(X["job_id"]),
+            "arrival_time": np.asarray(X["arrival_time"], dtype=float),
+            "runtime": np.asarray(y, dtype=float),
+        }
+    )
 
-    fit() is a no-op in the sense that there is no model to train; it still
-    walks the training set's completions to seed each job's running tau
-    (see module docstring for why predict() must continue this walk).
+
+class _SequentialPredictor(Predictor):
+    """Shared causal event walk for the online baselines.
+
+    fit() only stores the training events. predict() walks ONE merged
+    timeline of training and test events from an empty state, applying each
+    completion (train or test) only when it happens, and fixes each test
+    task's prediction at its own arrival. A training task that is still
+    running when a test task arrives is therefore not yet observed
+    (CLAUDE.md rule 2), and predict() is idempotent.
+
+    Subclasses define the per-job state through two pure functions:
+    _observe(state, runtime) -> new state, and _estimate(state) -> float|None.
+    """
+
+    def fit(self, X_train, y_train):
+        self._train_events = _event_frame(X_train, y_train)
+        return self
+
+    def predict(self, X) -> np.ndarray:
+        test_events = _event_frame(X, X["runtime"])
+        combined = pd.concat([self._train_events, test_events], ignore_index=True)
+        first_test_row = len(self._train_events)
+        return self._walk(combined, first_test_row)[first_test_row:]
+
+    def _observe(self, state, runtime):
+        raise NotImplementedError
+
+    def _estimate(self, state):
+        raise NotImplementedError
+
+    def _walk(self, df: pd.DataFrame, first_recorded_row: int) -> np.ndarray:
+        job_ids = df["job_id"].to_numpy()
+        runtimes = df["runtime"].to_numpy(dtype=float)
+        kinds, rows = _merged_events(df)
+        preds = np.full(len(df), np.nan)
+        job_state: dict = {}
+        global_sum, global_count = 0.0, 0
+
+        for kind, row in zip(kinds, rows):
+            job = job_ids[row]
+            if kind == _COMPLETION:
+                job_state[job] = self._observe(job_state.get(job), runtimes[row])
+                global_sum += runtimes[row]
+                global_count += 1
+                continue
+            if row < first_recorded_row:
+                continue
+            estimate = self._estimate(job_state.get(job))
+            if estimate is not None:
+                preds[row] = estimate
+            elif global_count:
+                preds[row] = global_sum / global_count
+            # else: nothing has completed yet anywhere -- leave as NaN.
+        return preds
+
+
+class ExponentialAveraging(_SequentialPredictor):
+    """tau_next = alpha * t_last + (1 - alpha) * tau_prev (Silberschatz &
+    Galvin's textbook formula), one tau per job.
 
     Bootstrap choice: the first time a job is observed to complete, tau_prev
     is undefined, so it is seeded to that first observed burst itself (i.e.
@@ -108,102 +172,28 @@ class ExponentialAveraging(Predictor):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"alpha must be in [0, 1], got {alpha}")
         self.alpha = alpha
-        self.job_tau: dict = {}
-        self.global_sum = 0.0
-        self.global_count = 0
 
-    def fit(self, X_train, y_train):
-        self._walk(self._event_frame(X_train, y_train), record_predictions=False)
-        return self
+    def _observe(self, tau_prev, runtime):
+        if tau_prev is None:
+            return runtime
+        return self.alpha * runtime + (1 - self.alpha) * tau_prev
 
-    def predict(self, X) -> np.ndarray:
-        df = X[["job_id", "arrival_time", "runtime"]]
-        return self._walk(df, record_predictions=True)
-
-    @staticmethod
-    def _event_frame(X, y):
-        return pd.DataFrame(
-            {
-                "job_id": X["job_id"].to_numpy(),
-                "arrival_time": X["arrival_time"].to_numpy(),
-                "runtime": np.asarray(y, dtype=float),
-            }
-        )
-
-    def _walk(self, df: pd.DataFrame, record_predictions: bool):
-        job_ids = df["job_id"].to_numpy()
-        runtimes = df["runtime"].to_numpy(dtype=float)
-        kinds, rows = _merged_events(df)
-        preds = np.full(len(df), np.nan) if record_predictions else None
-
-        for kind, row in zip(kinds, rows):
-            job = job_ids[row]
-            if kind == _ARRIVAL:
-                if record_predictions:
-                    if job in self.job_tau:
-                        preds[row] = self.job_tau[job]
-                    elif self.global_count:
-                        preds[row] = self.global_sum / self.global_count
-                    # else: no history anywhere yet -- leave as NaN.
-            else:  # _COMPLETION: observe the burst and update tau
-                t_last = runtimes[row]
-                tau_prev = self.job_tau.get(job, t_last)
-                self.job_tau[job] = self.alpha * t_last + (1 - self.alpha) * tau_prev
-                self.global_sum += t_last
-                self.global_count += 1
-        return preds
+    def _estimate(self, tau):
+        return tau
 
 
-class _WindowedMeanPredictor(Predictor):
-    """Shared machinery for 'mean of the last <window> same-job completed
-    runtimes, falling back to the running global mean.' Maintains state via
-    the same causal event walk as ExponentialAveraging, as an online
-    fit-then-continue estimator so state carries across train -> test.
-    """
+class _WindowedMeanPredictor(_SequentialPredictor):
+    """Mean of the last <window> same-job completed runtimes, falling back to
+    the running global mean when the job has no completed history yet."""
 
     def __init__(self, window: int):
         self.window = window
-        self.job_history: dict = {}
-        self.global_sum = 0.0
-        self.global_count = 0
 
-    def fit(self, X_train, y_train):
-        df = pd.DataFrame(
-            {
-                "job_id": X_train["job_id"].to_numpy(),
-                "arrival_time": X_train["arrival_time"].to_numpy(),
-                "runtime": np.asarray(y_train, dtype=float),
-            }
-        )
-        self._walk(df, record_predictions=False)
-        return self
+    def _observe(self, history, runtime):
+        return ((history or ()) + (runtime,))[-self.window:]
 
-    def predict(self, X) -> np.ndarray:
-        df = X[["job_id", "arrival_time", "runtime"]]
-        return self._walk(df, record_predictions=True)
-
-    def _walk(self, df: pd.DataFrame, record_predictions: bool):
-        job_ids = df["job_id"].to_numpy()
-        runtimes = df["runtime"].to_numpy(dtype=float)
-        kinds, rows = _merged_events(df)
-        preds = np.full(len(df), np.nan) if record_predictions else None
-
-        for kind, row in zip(kinds, rows):
-            job = job_ids[row]
-            if kind == _ARRIVAL:
-                if record_predictions:
-                    hist = self.job_history.get(job)
-                    if hist:
-                        window = hist[-self.window:]
-                        preds[row] = sum(window) / len(window)
-                    elif self.global_count:
-                        preds[row] = self.global_sum / self.global_count
-                    # else: no history anywhere yet -- leave as NaN.
-            else:  # _COMPLETION
-                self.job_history.setdefault(job, []).append(runtimes[row])
-                self.global_sum += runtimes[row]
-                self.global_count += 1
-        return preds
+    def _estimate(self, history):
+        return sum(history) / len(history) if history else None
 
 
 class Last2(_WindowedMeanPredictor):

@@ -5,7 +5,7 @@ n_tasks,10000.0
 train_fraction,0.8
 seed,42.0
 quantum,4.0
-recovery_pct,58.95134018103489
+recovery_pct,58.543010392170515
 crossover_uniform,1.5
 crossover_lognormal,2.0
 sigma_linear,2.2097599077671353

@@ -76,6 +76,27 @@ magnitude, and the aggregate error metric hides this.
 > SRTF and oracle SRTF, and retains an advantage over Round Robin up to a prediction
 > error of **Y%**.
 
+### Results (first 10,000 tasks of Alibaba cluster-trace-v2018, chronological split)
+
+> SRTF driven by gradient-boosted trees recovers **58.5%** of the waiting-time gap
+> between exponential-averaging SRTF and oracle SRTF, but **no prediction-driven SRTF
+> beats Round Robin**. SRTF loses to Round Robin at log-normal prediction error
+> sigma = 2; the fitted model's own error (sigma = 1.72) is structured, costing about
+> 2.9x the waiting time of random error of the same spread.
+
+| Scheduler | Avg waiting (h) |
+|---|---|
+| FCFS | 167 |
+| Round Robin (q = 4) | 11.5 |
+| SRTF + exponential averaging | 63.2 |
+| SRTF + linear regression | 39.4 |
+| SRTF + gradient boosting | 29.6 |
+| SRTF + oracle | 5.78 |
+
+The paper draft is in [`paper/`](paper/): LaTeX source `main.tex`, compiled
+`main.pdf`, and a Word version `research_paper_draft.docx`. Every number in the paper
+is generated from `results/tables/` by `src/make_tables.py`.
+
 ---
 
 ## 4. Data

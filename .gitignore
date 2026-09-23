@@ -4,10 +4,11 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
-results/figures/*.png
 paper/*.aux
 paper/*.bbl
 paper/*.blg
 paper/*.log
 paper/*.out
 paper/*.pdf
+!paper/main.pdf
+~$*

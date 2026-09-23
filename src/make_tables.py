@@ -120,6 +120,71 @@ def table_sensitivity():
     write("table_sensitivity.tex", body)
 
 
+LONG_TASK_SECONDS = 10_000
+
+
+def discussion_macros() -> list:
+    """Numbers quoted in Sections I, VI and VII, derived from the result CSVs.
+
+    Each value is a direct read, a ratio of two table cells, or (for the
+    noise-equivalent waiting time) a linear interpolation of the log-normal
+    sweep at the fitted model's empirical log-error spread.
+    """
+    comparison = pd.read_csv(os.path.join(TABLES_IN, "scheduler_comparison.csv")).set_index("scheduler")["avg_waiting_time"]
+    metrics = pd.read_csv(os.path.join(TABLES_IN, "prediction_metrics.csv")).set_index("predictor")
+    lognormal = pd.read_csv(os.path.join(TABLES_IN, "sensitivity_lognormal.csv")).sort_values("level")
+    summary = pd.read_csv(os.path.join(TABLES_IN, "run_summary.csv")).set_index("key")["value"]
+    preds = pd.read_csv(os.path.join(TABLES_IN, "test_predictions.csv"))
+
+    def hours(name):
+        return sig(comparison[name] / SECONDS_PER_HOUR)
+
+    sigma_gbm = summary["sigma_gbm"]
+    if not lognormal["level"].min() <= sigma_gbm <= lognormal["level"].max():
+        # interpolate() would silently hold the edge value instead of failing.
+        raise ValueError(f"sigma_gbm={sigma_gbm:.3f} lies outside the log-normal sweep "
+                         f"[{lognormal['level'].min()}, {lognormal['level'].max()}]; extend the sweep.")
+    w_noise = float(pd.Series(lognormal["avg_waiting_time"].values, index=lognormal["level"].values)
+                    .reindex(sorted(set(lognormal["level"]) | {summary["sigma_gbm"]}))
+                    .interpolate(method="index")[summary["sigma_gbm"]])
+    mae = metrics.loc[["Median", "Linear", "GBM"], "mae"]
+    long_tasks = preds[preds["actual"] > LONG_TASK_SECONDS]
+
+    values = {
+        "wFCFS": hours("FCFS"),
+        "wRR": hours("RR(q=4)"),
+        "wExpAvg": hours("SRTF+ExpAvg"),
+        "wLinear": hours("SRTF+Linear"),
+        "wGBM": hours("SRTF+GBM"),
+        "wOracle": hours("SRTF+Oracle"),
+        "ratioExpAvgOracle": sig(comparison["SRTF+ExpAvg"] / comparison["SRTF+Oracle"]),
+        "ratioExpAvgRR": sig(comparison["SRTF+ExpAvg"] / comparison["RR(q=4)"]),
+        "ratioGBMRR": sig(comparison["SRTF+GBM"] / comparison["RR(q=4)"]),
+        "ratioLinearGBM": sig(comparison["SRTF+Linear"] / comparison["SRTF+GBM"]),
+        "maeSpreadPct": sig(100 * (mae.max() / mae.min() - 1)),
+        "underExpAvg": sig(100 * metrics.loc["ExpAvg", "under_prediction_rate"]),
+        "underLinear": sig(100 * metrics.loc["Linear", "under_prediction_rate"]),
+        "underGBM": sig(100 * metrics.loc["GBM", "under_prediction_rate"]),
+        "wNoiseAtSigmaGBM": sig(w_noise / SECONDS_PER_HOUR),
+        "ratioGBMNoise": sig(comparison["SRTF+GBM"] / w_noise, 2),
+        "longTaskThreshold": f"{LONG_TASK_SECONDS:,}",
+        "nLongTest": f"{len(long_tasks):d}",
+        "longGBMMin": sig(long_tasks["GBM"].min()),
+        "longGBMMax": sig(long_tasks["GBM"].max()),
+        "maxGBMPred": sig(preds["GBM"].max()),
+        "maxActual": f"{int(preds['actual'].max()):,}",
+        "medianActual": f"{preds['actual'].median():g}",
+        # SRTF consumes only the ORDER of predictions, so rank agreement with
+        # the actual runtime is reported alongside MAE.
+        "spearmanGBM": f"{preds['GBM'].corr(preds['actual'], method='spearman'):.2f}",
+        "spearmanLinear": f"{preds['Linear'].corr(preds['actual'], method='spearman'):.2f}",
+        "spearmanExpAvg": f"{preds['ExpAvg'].corr(preds['actual'], method='spearman'):.2f}",
+        "meanExpAvgPred": f"{int(round(preds['ExpAvg'].mean())):,}",
+        "testWindow": f"{int(preds['arrival_time'].max() - preds['arrival_time'].min()):d}",
+    }
+    return [f"\\newcommand{{\\{name}}}{{{value}}}" for name, value in values.items()]
+
+
 def macros():
     comparison = pd.read_csv(os.path.join(TABLES_IN, "scheduler_comparison.csv")).set_index("scheduler")["avg_waiting_time"]
     summary = pd.read_csv(os.path.join(TABLES_IN, "run_summary.csv")).set_index("key")["value"]
@@ -145,6 +210,7 @@ def macros():
         f"\\newcommand{{\\sigmaLinear}}{{{summary['sigma_linear']:.2f}}}",
         f"\\newcommand{{\\sigmaGBM}}{{{summary['sigma_gbm']:.2f}}}",
     ]
+    lines += discussion_macros()
     write("macros.tex", "\n".join(lines) + "\n")
 
 
